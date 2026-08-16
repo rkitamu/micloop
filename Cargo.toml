@@ -2,6 +2,7 @@
 name = "micloop"
 version = "0.1.0"
 edition = "2021"
+authors = ["rkitamu"]
 description = "Hotkey-controlled microphone loopback for PulseAudio/PipeWire"
 license = "MIT"
 
