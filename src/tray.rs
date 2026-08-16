@@ -83,7 +83,7 @@ fn start_engine(
     cfg: &Config,
     handle: &ksni::Handle<MicloopTray>,
 ) -> Result<(Listener, Arc<Mutex<Loopback>>), String> {
-    let loopback = Arc::new(Mutex::new(Loopback::new(cfg.latency_msec)));
+    let loopback = Arc::new(Mutex::new(Loopback::new(cfg)));
     let lb = loopback.clone();
     let tray_handle = handle.clone();
     let mode = cfg.mode;

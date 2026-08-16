@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use eframe::egui;
 
-use crate::config::{self, Config, Mode, Modifier};
+use crate::config::{self, Config, Mode, Modifier, Output};
 use crate::listener::{capture_hotkey, parse_key};
 
 /// バックグラウンドでホットキーの組み合わせを1つ録取する。
@@ -127,8 +127,38 @@ impl eframe::App for SettingsApp {
                     }
                     ui.end_row();
 
+                    ui.label("出力");
+                    egui::ComboBox::from_id_salt("output")
+                        .selected_text(match self.cfg.output {
+                            Output::Realtime => "リアルタイム再生",
+                            Output::Delayed => "OFF時にまとめて再生",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.cfg.output,
+                                Output::Realtime,
+                                "リアルタイム再生",
+                            );
+                            ui.selectable_value(
+                                &mut self.cfg.output,
+                                Output::Delayed,
+                                "OFF時にまとめて再生",
+                            );
+                        });
+                    ui.end_row();
+
                     ui.label("レイテンシ");
-                    ui.add(egui::Slider::new(&mut self.cfg.latency_msec, 1..=200).suffix(" ms"));
+                    ui.add_enabled(
+                        self.cfg.output == Output::Realtime,
+                        egui::Slider::new(&mut self.cfg.latency_msec, 1..=200).suffix(" ms"),
+                    );
+                    ui.end_row();
+
+                    ui.label("最大録音時間");
+                    ui.add_enabled(
+                        self.cfg.output == Output::Delayed,
+                        egui::Slider::new(&mut self.cfg.max_record_secs, 10..=3600).suffix(" 秒"),
+                    );
                     ui.end_row();
                 });
 
@@ -184,7 +214,7 @@ fn install_jp_font(ctx: &egui::Context) {
 pub fn run() -> i32 {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 220.0])
+            .with_inner_size([400.0, 300.0])
             .with_title("micloop 設定"),
         ..Default::default()
     };

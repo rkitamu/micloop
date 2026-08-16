@@ -39,6 +39,9 @@ enum Command {
         /// 設定ファイルの修飾キーを上書き (複数指定可)
         #[arg(long = "modifier")]
         modifiers: Vec<config::Modifier>,
+        /// 設定ファイルの出力方式を上書き (realtime / delayed)
+        #[arg(long)]
+        output: Option<config::Output>,
     },
     /// 稼働中のインスタンスを停止する
     Stop,
@@ -52,7 +55,12 @@ enum Command {
     },
 }
 
-fn run_headless(mode: Option<Mode>, key: Option<String>, modifiers: Vec<config::Modifier>) -> i32 {
+fn run_headless(
+    mode: Option<Mode>,
+    key: Option<String>,
+    modifiers: Vec<config::Modifier>,
+    output: Option<config::Output>,
+) -> i32 {
     let mut cfg = config::load();
     if let Some(mode) = mode {
         cfg.mode = mode;
@@ -63,8 +71,11 @@ fn run_headless(mode: Option<Mode>, key: Option<String>, modifiers: Vec<config::
     if !modifiers.is_empty() {
         cfg.modifiers = modifiers;
     }
+    if let Some(output) = output {
+        cfg.output = output;
+    }
 
-    let loopback = Arc::new(Mutex::new(Loopback::new(cfg.latency_msec)));
+    let loopback = Arc::new(Mutex::new(Loopback::new(&cfg)));
     let lb = loopback.clone();
     let mode = cfg.mode;
     let listener = match Listener::spawn(&cfg.key, cfg.modifiers.clone(), move |pressed| {
@@ -142,7 +153,8 @@ fn main() -> std::process::ExitCode {
             mode,
             key,
             modifiers,
-        }) => run_headless(mode, key, modifiers),
+            output,
+        }) => run_headless(mode, key, modifiers, output),
         Some(Command::Stop) => {
             instance::stop_running(true);
             0

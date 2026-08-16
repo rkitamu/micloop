@@ -25,6 +25,15 @@ impl std::fmt::Display for Mode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
+pub enum Output {
+    /// リアルタイムにループバック再生
+    Realtime,
+    /// ONの間録音し、OFFにした瞬間にまとめて再生
+    Delayed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
 pub enum Modifier {
     Ctrl,
     Shift,
@@ -57,6 +66,9 @@ pub struct Config {
     pub modifiers: Vec<Modifier>,
     pub mode: Mode,
     pub latency_msec: u32,
+    pub output: Output,
+    /// delayed時の最大録音秒数。tmpfs (RAM) を食い潰さないための上限
+    pub max_record_secs: u32,
 }
 
 impl Default for Config {
@@ -66,6 +78,8 @@ impl Default for Config {
             modifiers: vec![Modifier::Ctrl],
             mode: Mode::Toggle,
             latency_msec: 20,
+            output: Output::Realtime,
+            max_record_secs: 600,
         }
     }
 }
@@ -132,6 +146,8 @@ mod tests {
             modifiers: vec![Modifier::Ctrl, Modifier::Super],
             mode: Mode::Hold,
             latency_msec: 5,
+            output: Output::Delayed,
+            max_record_secs: 30,
         };
         save_to(&cfg, &path).unwrap();
         assert_eq!(load_from(&path), cfg);
