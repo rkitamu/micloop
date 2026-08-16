@@ -69,6 +69,9 @@ pub struct Config {
     pub output: Output,
     /// delayed時の最大録音秒数。tmpfs (RAM) を食い潰さないための上限
     pub max_record_secs: u32,
+    /// 録音履歴ウィンドウを開くホットキー。Noneなら無効
+    pub history_key: Option<String>,
+    pub history_modifiers: Vec<Modifier>,
 }
 
 impl Default for Config {
@@ -80,21 +83,28 @@ impl Default for Config {
             latency_msec: 20,
             output: Output::Realtime,
             max_record_secs: 600,
+            history_key: None,
+            history_modifiers: vec![],
         }
     }
 }
 
+/// 表示用のホットキー表記 (例: "Ctrl+Super+M")。
+pub fn format_hotkey(modifiers: &[Modifier], key: &str) -> String {
+    let mut parts: Vec<String> = modifiers.iter().map(Modifier::to_string).collect();
+    parts.push(key.strip_prefix("KEY_").unwrap_or(key).to_string());
+    parts.join("+")
+}
+
 impl Config {
-    /// 表示用のホットキー表記 (例: "Ctrl+Super+M")。
     pub fn hotkey_label(&self) -> String {
-        let mut parts: Vec<String> = self.modifiers.iter().map(Modifier::to_string).collect();
-        parts.push(
-            self.key
-                .strip_prefix("KEY_")
-                .unwrap_or(&self.key)
-                .to_string(),
-        );
-        parts.join("+")
+        format_hotkey(&self.modifiers, &self.key)
+    }
+
+    pub fn history_hotkey_label(&self) -> Option<String> {
+        self.history_key
+            .as_deref()
+            .map(|key| format_hotkey(&self.history_modifiers, key))
     }
 }
 
@@ -148,6 +158,8 @@ mod tests {
             latency_msec: 5,
             output: Output::Delayed,
             max_record_secs: 30,
+            history_key: Some("KEY_F10".into()),
+            history_modifiers: vec![Modifier::Ctrl],
         };
         save_to(&cfg, &path).unwrap();
         assert_eq!(load_from(&path), cfg);

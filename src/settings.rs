@@ -40,9 +40,15 @@ impl Drop for Capture {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum CaptureTarget {
+    Main,
+    History,
+}
+
 struct SettingsApp {
     cfg: Config,
-    capture: Option<Capture>,
+    capture: Option<(CaptureTarget, Capture)>,
     error: Option<&'static str>,
 }
 
@@ -56,25 +62,50 @@ impl SettingsApp {
     }
 
     fn poll_capture(&mut self, ctx: &egui::Context) {
-        let Some(capture) = self.capture.take() else {
+        let Some((target, capture)) = self.capture.take() else {
             return;
         };
         match capture.rx.try_recv() {
             Ok((mods, key)) => {
                 if mods.is_empty() {
                     self.error = Some("修飾キーを含めて押してください (例: Ctrl+A)");
-                    self.capture = Some(Capture::start());
+                    self.capture = Some((target, Capture::start()));
                 } else {
-                    self.cfg.modifiers = mods;
-                    self.cfg.key = key;
+                    match target {
+                        CaptureTarget::Main => {
+                            self.cfg.modifiers = mods;
+                            self.cfg.key = key;
+                        }
+                        CaptureTarget::History => {
+                            self.cfg.history_modifiers = mods;
+                            self.cfg.history_key = Some(key);
+                        }
+                    }
                     self.error = None;
                 }
             }
             Err(TryRecvError::Empty) => {
                 ctx.request_repaint_after(Duration::from_millis(100));
-                self.capture = Some(capture);
+                self.capture = Some((target, capture));
             }
             Err(TryRecvError::Disconnected) => {} // Escで取り消し
+        }
+    }
+
+    fn hotkey_button(&mut self, ui: &mut egui::Ui, target: CaptureTarget, label: String) {
+        let recording = self.capture.as_ref().is_some_and(|(t, _)| *t == target);
+        let label = if recording {
+            "Recording... (Escで取り消し)".to_string()
+        } else {
+            label
+        };
+        if ui.button(label).clicked() {
+            if recording {
+                self.capture = None;
+            } else {
+                self.error = None;
+                self.capture = Some((target, Capture::start()));
+            }
         }
     }
 
@@ -84,6 +115,11 @@ impl SettingsApp {
         }
         if parse_key(&self.cfg.key).is_none() {
             return Some("ホットキーが未登録です");
+        }
+        if let Some(hkey) = &self.cfg.history_key {
+            if *hkey == self.cfg.key && self.cfg.history_modifiers == self.cfg.modifiers {
+                return Some("履歴ホットキーがメインのホットキーと重複しています");
+            }
         }
         None
     }
@@ -111,20 +147,22 @@ impl eframe::App for SettingsApp {
                     ui.end_row();
 
                     ui.label("ホットキー");
-                    let recording = self.capture.is_some();
-                    let label = if recording {
-                        "Recording... (Escで取り消し)".to_string()
-                    } else {
-                        self.cfg.hotkey_label()
-                    };
-                    if ui.button(label).clicked() {
-                        if recording {
-                            self.capture = None;
-                        } else {
-                            self.error = None;
-                            self.capture = Some(Capture::start());
+                    let label = self.cfg.hotkey_label();
+                    self.hotkey_button(ui, CaptureTarget::Main, label);
+                    ui.end_row();
+
+                    ui.label("履歴ホットキー");
+                    ui.horizontal(|ui| {
+                        let label = self
+                            .cfg
+                            .history_hotkey_label()
+                            .unwrap_or_else(|| "未設定 (クリックで登録)".into());
+                        self.hotkey_button(ui, CaptureTarget::History, label);
+                        if self.cfg.history_key.is_some() && ui.button("クリア").clicked() {
+                            self.cfg.history_key = None;
+                            self.cfg.history_modifiers.clear();
                         }
-                    }
+                    });
                     ui.end_row();
 
                     ui.label("出力");
@@ -187,7 +225,7 @@ impl eframe::App for SettingsApp {
 }
 
 /// eguiの既定フォントはCJKグリフを含まないため、システムの日本語フォントを足す。
-fn install_jp_font(ctx: &egui::Context) {
+pub fn install_jp_font(ctx: &egui::Context) {
     let Some(path) = std::process::Command::new("fc-match")
         .args(["-f", "%{file}", "sans:lang=ja"])
         .output()
@@ -214,8 +252,11 @@ fn install_jp_font(ctx: &egui::Context) {
 pub fn run() -> i32 {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 300.0])
-            .with_title("micloop 設定"),
+            .with_inner_size([400.0, 340.0])
+            // WaylandのCSDタイトルはCJKが豆腐になるためASCIIにする
+            .with_title("micloop - Settings")
+            // micloop.desktop と一致させ、dockに歯車ではなくアプリアイコンを出す
+            .with_app_id("micloop"),
         ..Default::default()
     };
     let result = eframe::run_native(

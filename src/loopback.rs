@@ -5,7 +5,7 @@
 //! - pw-loopback: PipeWire (pactlが無い構成)。プロセスの生死がON/OFF
 
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use crate::config::{Config, Mode, Output};
@@ -14,14 +14,17 @@ enum State {
     Off,
     /// pactl load-module が返したモジュールID
     PactlModule(String),
-    /// 稼働中の pw-loopback プロセス
     PwProcess(Child),
-    /// 稼働中の録音プロセス (timeoutでラップ済み、delayedモード)
-    Recording(Child),
+    /// 稼働中の録音プロセス (timeoutでラップ済み、delayedモード) と録音先
+    Recording(Child, PathBuf),
 }
 
+/// 履歴として残す録音数の上限。tmpfs (RAM) を食い潰さないため
+// ponytail: 固定値。変えたい要望が出たら設定に昇格
+const MAX_RECORDINGS: usize = 20;
+
 /// (録音コマンド, 再生コマンド)。pactl系優先は既存バックエンド選択と同じ順。
-fn record_tools() -> Option<(&'static str, &'static str)> {
+pub fn record_tools() -> Option<(&'static str, &'static str)> {
     let in_path = |bin: &str| {
         std::env::var_os("PATH").is_some_and(|paths| {
             std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file())
@@ -36,15 +39,66 @@ fn record_tools() -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// 録音先。XDG_RUNTIME_DIRはtmpfsなのでディスクに書かず、ログアウトで消える。
-fn wav_path() -> PathBuf {
+/// 録音先ディレクトリ。XDG_RUNTIME_DIRはtmpfsなのでディスクに書かず、ログアウトで消える。
+fn recordings_dir() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("micloop.wav")
 }
 
-fn kill_and_reap(mut child: Child) {
+/// 新しい録音先。ファイル名のunixミリ秒が履歴の時系列キーになる。
+fn new_wav_path() -> PathBuf {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    recordings_dir().join(format!("micloop-{ms}.wav"))
+}
+
+/// 録音履歴を (unixミリ秒, パス) で新しい順に返す。
+pub fn recordings() -> Vec<(u64, PathBuf)> {
+    recordings_in(&recordings_dir())
+}
+
+fn recordings_in(dir: &Path) -> Vec<(u64, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    let mut list: Vec<(u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let ms = name.strip_prefix("micloop-")?.strip_suffix(".wav")?.parse().ok()?;
+            Some((ms, e.path()))
+        })
+        .collect();
+    list.sort_unstable_by(|a, b| b.cmp(a));
+    list
+}
+
+/// 新規録音1件分の空きを作る (古い順に削除)。
+fn prune_recordings() {
+    for (_, path) in recordings().into_iter().skip(MAX_RECORDINGS - 1) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// WAVヘッダのバイトレートから長さ(秒)を概算する。
+/// parecord/pw-record が書く標準ヘッダ (fmtチャンクがオフセット12固定) 前提。
+pub fn wav_secs(path: &Path) -> Option<u64> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 32];
+    file.read_exact(&mut head).ok()?;
+    if &head[0..4] != b"RIFF" || &head[8..12] != b"WAVE" {
+        return None;
+    }
+    let byte_rate = u32::from_le_bytes(head[28..32].try_into().unwrap()) as u64;
+    let data_len = file.metadata().ok()?.len().saturating_sub(44);
+    (byte_rate > 0).then_some(data_len / byte_rate)
+}
+
+pub fn kill_and_reap(mut child: Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -128,14 +182,16 @@ impl Loopback {
 
     fn start_record(&self) -> std::io::Result<State> {
         let (recorder, _) = record_tools().ok_or(ErrorKind::NotFound)?;
+        prune_recordings();
+        let path = new_wav_path();
         // timeoutで録音時間に上限を張り、tmpfsを食い潰さないようにする。
         // 時間切れでもSIGTERMなのでWAVヘッダは正常に閉じられる
         let child = Command::new("timeout")
             .arg(self.max_record_secs.to_string())
             .arg(recorder)
-            .arg(wav_path())
+            .arg(&path)
             .spawn()?;
-        Ok(State::Recording(child))
+        Ok(State::Recording(child, path))
     }
 
     fn start_pw_loopback(&self) -> std::io::Result<State> {
@@ -156,13 +212,13 @@ impl Loopback {
                 let _ = child.kill();
                 let _ = child.wait(); // ゾンビ回収
             }
-            State::Recording(mut child) => {
+            State::Recording(mut child, path) => {
                 // Child::kill()はSIGKILLでWAVヘッダが壊れるため、SIGTERMで閉じさせる。
                 // timeoutはSIGTERMを録音プロセスへ転送してから終了する
                 unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
                 let _ = child.wait();
                 if let Some((_, player)) = record_tools() {
-                    match Command::new(player).arg(wav_path()).spawn() {
+                    match Command::new(player).arg(&path).spawn() {
                         Ok(child) => self.playing = Some(child),
                         Err(err) => eprintln!("再生の開始に失敗: {err}"),
                     }
@@ -180,13 +236,13 @@ impl Loopback {
     }
 }
 
+// 録音ファイルは履歴として意図的に残す (tmpfsなのでログアウトで消える)
 impl Drop for Loopback {
     fn drop(&mut self) {
         self.stop();
         if let Some(child) = self.playing.take() {
             kill_and_reap(child);
         }
-        let _ = std::fs::remove_file(wav_path());
     }
 }
 
@@ -207,6 +263,32 @@ mod tests {
     fn hold_follows_key_state() {
         assert_eq!(transition(Mode::Hold, true, false), Some(true));
         assert_eq!(transition(Mode::Hold, false, true), Some(false));
+    }
+
+    #[test]
+    fn recordings_sorted_newest_first_ignoring_others() {
+        let dir = std::env::temp_dir().join("micloop-test-recordings");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["micloop-200.wav", "micloop-100.wav", "other.wav", "micloop-x.wav"] {
+            std::fs::write(dir.join(name), b"").unwrap();
+        }
+        let ms: Vec<u64> = recordings_in(&dir).into_iter().map(|(ms, _)| ms).collect();
+        assert_eq!(ms, vec![200, 100]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn wav_secs_reads_byte_rate() {
+        let path = std::env::temp_dir().join("micloop-test.wav");
+        let mut head = Vec::new();
+        head.extend_from_slice(b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0\x02\0");
+        head.extend_from_slice(&44100u32.to_le_bytes()); // sample rate
+        head.extend_from_slice(&176400u32.to_le_bytes()); // byte rate (offset 28)
+        head.resize(44, 0);
+        head.resize(44 + 176400 * 3, 0); // 3秒ぶんのデータ
+        std::fs::write(&path, &head).unwrap();
+        assert_eq!(wav_secs(&path), Some(3));
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

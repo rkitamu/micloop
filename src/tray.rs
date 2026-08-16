@@ -3,6 +3,7 @@
 //! 設定画面は別プロセス (`micloop settings`) として起動し、
 //! 終了後に設定を読み直してリスナーを再起動する。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,6 +16,7 @@ use crate::loopback::{transition, Loopback};
 enum Msg {
     OpenSettings,
     SettingsClosed,
+    OpenHistory,
     Quit,
 }
 
@@ -59,6 +61,14 @@ impl ksni::Tray for MicloopTray {
             .into(),
             MenuItem::Separator,
             StandardItem {
+                label: "録音履歴...".into(),
+                activate: Box::new(|tray: &mut Self| {
+                    let _ = tray.tx.send(Msg::OpenHistory);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: "設定...".into(),
                 activate: Box::new(|tray: &mut Self| {
                     let _ = tray.tx.send(Msg::OpenSettings);
@@ -78,11 +88,25 @@ impl ksni::Tray for MicloopTray {
     }
 }
 
+/// 履歴ウィンドウを別プロセスで開く。既に開いていれば何もしない。
+fn open_history(open: &Arc<AtomicBool>) {
+    if open.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let open = open.clone();
+    let exe = std::env::current_exe().expect("current_exe");
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new(exe).arg("history").status();
+        open.store(false, Ordering::SeqCst);
+    });
+}
+
 /// リスナーとループバックひと組の起動。設定変更時に作り直す。
 fn start_engine(
     cfg: &Config,
     handle: &ksni::Handle<MicloopTray>,
-) -> Result<(Listener, Arc<Mutex<Loopback>>), String> {
+    history_open: &Arc<AtomicBool>,
+) -> Result<(Vec<Listener>, Arc<Mutex<Loopback>>), String> {
     let loopback = Arc::new(Mutex::new(Loopback::new(cfg)));
     let lb = loopback.clone();
     let tray_handle = handle.clone();
@@ -101,7 +125,21 @@ fn start_engine(
             });
         }
     })?;
-    Ok((listener, loopback))
+
+    let mut listeners = vec![listener];
+    if let Some(history_key) = &cfg.history_key {
+        let open = history_open.clone();
+        match Listener::spawn(history_key, cfg.history_modifiers.clone(), move |pressed| {
+            if pressed {
+                open_history(&open);
+            }
+        }) {
+            Ok(listener) => listeners.push(listener),
+            // 履歴が開けないだけで本体を止めないため、エラーは警告に留める
+            Err(err) => eprintln!("履歴ホットキーを無効化: {err}"),
+        }
+    }
+    Ok((listeners, loopback))
 }
 
 fn set_status(handle: &ksni::Handle<MicloopTray>, active: bool, status: String) {
@@ -128,8 +166,9 @@ pub fn run() -> i32 {
         let _ = signal_hook::flag::register(sig, term.clone());
     }
 
+    let history_open = Arc::new(AtomicBool::new(false));
     let mut cfg = config::load();
-    let mut engine = match start_engine(&cfg, &handle) {
+    let mut engine = match start_engine(&cfg, &handle, &history_open) {
         Ok(engine) => {
             set_status(
                 &handle,
@@ -148,10 +187,13 @@ pub fn run() -> i32 {
     loop {
         match rx.recv_timeout(Duration::from_millis(300)) {
             Ok(Msg::Quit) => break,
+            Ok(Msg::OpenHistory) => open_history(&history_open),
             Ok(Msg::OpenSettings) => {
                 // キー取得中の誤発動を防ぐため、設定中はホットキーを止める
-                if let Some((listener, loopback)) = engine.take() {
-                    listener.stop();
+                if let Some((listeners, loopback)) = engine.take() {
+                    for listener in listeners {
+                        listener.stop();
+                    }
                     loopback.lock().expect("loopback lock").stop();
                 }
                 set_status(&handle, false, "設定中 (ホットキー停止)".into());
@@ -164,7 +206,7 @@ pub fn run() -> i32 {
             }
             Ok(Msg::SettingsClosed) => {
                 cfg = config::load();
-                match start_engine(&cfg, &handle) {
+                match start_engine(&cfg, &handle, &history_open) {
                     Ok(new_engine) => {
                         set_status(
                             &handle,
@@ -188,8 +230,10 @@ pub fn run() -> i32 {
         }
     }
 
-    if let Some((listener, loopback)) = engine.take() {
-        listener.stop();
+    if let Some((listeners, loopback)) = engine.take() {
+        for listener in listeners {
+            listener.stop();
+        }
         loopback.lock().expect("loopback lock").stop();
     }
     instance::release();

@@ -21,11 +21,15 @@ make uninstall
 ホットキーは録取式 (ボタンを押して実際の組み合わせを入力、修飾キー必須、Escで取り消し)。
 既定は `Ctrl+ScrollLock`、モードは toggle (押すたびON/OFF) / hold (押している間だけON)。
 
+delayed出力の録音は履歴として直近20件残り (tmpfs、ログアウトで消える)、
+トレイの「録音履歴...」または履歴ホットキー (設定で登録) から時系列リストを開いて再生できる。
+
 ```bash
 micloop                # トレイ常駐 (引数なし)
 micloop run [--mode toggle|hold] [--modifier ctrl]... [--key KEY_F9]
 micloop stop
 micloop settings
+micloop history
 micloop desktop [--uninstall]
 ```
 

@@ -1,6 +1,7 @@
 //! micloop: マイク入力をホットキーでループバック再生する。
 
 mod config;
+mod history;
 mod instance;
 mod listener;
 mod loopback;
@@ -47,6 +48,8 @@ enum Command {
     Stop,
     /// 設定画面を開く (トレイからも起動される)
     Settings,
+    /// 録音履歴を開く (トレイ/ホットキーからも起動される)
+    History,
     /// ランチャー用 .desktop を生成する
     Desktop {
         /// .desktop を削除する
@@ -108,17 +111,37 @@ fn run_headless(
     0
 }
 
+/// アプリアイコン。テーマ側のマイクアイコンはフルカラー版が無い環境が多く
+/// (Yaru/Adwaitaはsymbolicのみ)、名前解決に失敗すると歯車になるため自前で持つ。
+const ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <circle cx="32" cy="32" r="30" fill="#e95420"/>
+  <rect x="26" y="13" width="12" height="23" rx="6" fill="#ffffff"/>
+  <path d="M20 30v3a12 12 0 0 0 24 0v-3" stroke="#ffffff" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M32 45v5M25 50h14" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+</svg>
+"##;
+
 fn desktop(uninstall: bool) -> i32 {
-    let apps = std::env::var_os("XDG_DATA_HOME")
+    let data = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| config::home_dir().join(".local/share"))
-        .join("applications");
+        .unwrap_or_else(|| config::home_dir().join(".local/share"));
+    let apps = data.join("applications");
     let path = apps.join("micloop.desktop");
+    let icon_path = data.join("icons/hicolor/scalable/apps/micloop.svg");
 
     if uninstall {
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&icon_path);
         println!("削除しました: {}", path.display());
         return 0;
+    }
+
+    if let Err(err) = icon_path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&icon_path, ICON_SVG))
+    {
+        eprintln!("アイコンの生成に失敗: {err}");
     }
 
     let exe = std::env::current_exe().expect("current_exe");
@@ -128,7 +151,7 @@ fn desktop(uninstall: bool) -> i32 {
          Name=Micloop\n\
          Comment=マイクループバック (ホットキー制御)\n\
          Exec={}\n\
-         Icon=audio-input-microphone\n\
+         Icon=micloop\n\
          Terminal=false\n\
          Categories=AudioVideo;Audio;\n\
          Keywords=micloop;loopback;mic;\n",
@@ -160,6 +183,7 @@ fn main() -> std::process::ExitCode {
             0
         }
         Some(Command::Settings) => settings::run(),
+        Some(Command::History) => history::run(),
         Some(Command::Desktop { uninstall }) => desktop(uninstall),
     };
     std::process::ExitCode::from(code as u8)
